@@ -7,7 +7,7 @@ from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from collections import defaultdict
 import psycopg2
-from datetime import datetime, timedelta
+from datetime import datetime
 
 # Configuration
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
@@ -220,7 +220,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     # Check if chat is allowed
     if chat_id not in allowed_chats:
-        # Indent the next two lines properly
         await update.message.reply_text("❌ This chat is not authorized to use this bot")
         return
     
@@ -229,7 +228,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if user.id in user_last_message and (now - user_last_message[user.id]).seconds < 2:
         await message.delete()
         return
-    # ... rest of the code remains unchanged
+    user_last_message[user.id] = now
     
     # Skip admin checks in private chats
     if chat_id > 0:
@@ -295,7 +294,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             print(f"Action error: {e}")
 
-async def main():
+def main():
     # Setup and initialization
     setup_database()
     load_blacklist()
@@ -318,7 +317,7 @@ async def main():
     application.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_message))
 
     print("🛡️ Guardian Bot is now running...")
-    await application.run_polling(allowed_updates=Update.ALL_TYPES)
+    application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
     # Start Flask thread for keep-alive
@@ -326,4 +325,4 @@ if __name__ == "__main__":
     flask_thread.start()
     
     # Run the bot
-    asyncio.run(main())
+    main()

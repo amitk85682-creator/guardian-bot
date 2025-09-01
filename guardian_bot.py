@@ -220,16 +220,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     # Check if chat is allowed
     if chat_id not in allowed_chats:
-    # Line 223 (CORRECT - Indented with 4 spaces)
-    await update.message.reply_text("❌ This chat is not authorized to use this bot")
-    return
+        # Indent the next two lines properly
+        await update.message.reply_text("❌ This chat is not authorized to use this bot")
+        return
     
     # Flood protection
     now = datetime.now()
     if user.id in user_last_message and (now - user_last_message[user.id]).seconds < 2:
         await message.delete()
         return
-    user_last_message[user.id] = now
+    # ... rest of the code remains unchanged
     
     # Skip admin checks in private chats
     if chat_id > 0:

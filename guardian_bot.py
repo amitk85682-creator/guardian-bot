@@ -219,9 +219,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
     
     # Check if chat is allowed
-    if chat_id not in allowed_chats and chat_id > 0:  # Negative IDs are groups
-        await update.message.reply_text("❌ This chat is not authorized to use this bot")
-        return
+    if chat_id not in allowed_chats:
+    await update.message.reply_text("❌ This chat is not authorized to use this bot")
+    return
     
     # Flood protection
     now = datetime.now()

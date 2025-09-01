@@ -220,6 +220,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     # Check if chat is allowed
     if chat_id not in allowed_chats:
+    # Line 223 (CORRECT - Indented with 4 spaces)
     await update.message.reply_text("❌ This chat is not authorized to use this bot")
     return
     

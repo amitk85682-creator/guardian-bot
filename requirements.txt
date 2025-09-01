@@ -1,5 +1,6 @@
-export TELEGRAM_BOT_TOKEN="your_bot_token_here"
-export GEMINI_API_KEY="your_gemini_api_key"
-export ADMIN_USER_ID="your_user_id"
-export DATABASE_URL="your_postgresql_url"
-export PORT="8080"
+python-telegram-bot==20.7
+google-generativeai
+flask
+waitress
+psycopg2-binary
+python-dotenv

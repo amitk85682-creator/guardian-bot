@@ -6,6 +6,7 @@ from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from collections import defaultdict
 import psycopg2
+import asyncio # <-- यह लाइन जोड़ दी गई है
 
 # --- Configuration ---
 TELEGRAM_BOT_TOKEN = os.environ.get("GUARDIAN_BOT_TOKEN")
@@ -96,7 +97,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.message.from_user
     chat_id = update.effective_chat.id
     message = update.message
-
+    
     try:
         chat_admins = await context.bot.get_chat_administrators(chat_id)
         admin_ids = {admin.user.id for admin in chat_admins}
@@ -104,7 +105,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
     except Exception:
         if user.id == ADMIN_USER_ID: return
-
+        
     text = message.text or message.caption or ""
     text_lower = text.lower()
     is_spam = False
@@ -114,10 +115,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if any(entity.type in ['url', 'text_link'] for entity in message.entities or []): is_spam, reason = True, "Links are not allowed."
     if not is_spam and '@' in text: is_spam, reason = True, "Mentions are not allowed."
     if not is_spam and (message.forward_from or message.forward_from_chat): is_spam, reason = True, "Forwarded messages are not allowed."
-
+    
     # Dynamic Blacklist
     if not is_spam and any(word in text_lower for word in blacklist_words): is_spam, reason = True, "A forbidden word was used."
-
+    
     # AI Analysis
     if not is_spam and text and len(text) > 20: # Only check longer messages with AI
         try:

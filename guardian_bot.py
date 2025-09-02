@@ -29,7 +29,8 @@ logger = logging.getLogger(__name__)
 SPAM_DETECTION_PROMPT = """You are a vigilant spam detection AI for Telegram. Analyze messages and:
 1. Reply with "SPAM" if it contains promotions, scams, ads, or suspicious links
 2. Reply with "OK" for normal messages
-3. Consider cultural context and multiple languages"""
+3. Consider cultural context and multiple languages
+4. Pay special attention to CP (child porn), adult content, selling, and illegal activities"""
 genai.configure(api_key=GEMINI_API_KEY)
 spam_model = genai.GenerativeModel(model_name='gemini-1.5-flash', system_instruction=SPAM_DETECTION_PROMPT)
 
@@ -39,7 +40,7 @@ user_last_message = defaultdict(datetime)
 blacklist_words = set()
 allowed_chats = set()
 
-# Advanced spam patterns
+# Advanced spam patterns - इन्हें डेटाबेस में भी जोड़ें
 spam_patterns = [
     r"lowest price",
     r"premium collection",
@@ -55,10 +56,15 @@ spam_patterns = [
     r"arabians cp",
     r"bro-sis cp",
     r"dad-daughter cp",
-    r"pedo mom-son cp"
+    r"pedo mom-son cp",
+    r"premium cp",
+    r"content collection",
+    r"price available",
+    r"payment method",
+    r"upi|paypal|crypto|gift card"
 ]
 
-payment_terms = ["upi", "paypal", "crypto", "gift card", "payment", "purchase", "price"]
+payment_terms = ["upi", "paypal", "crypto", "gift card", "payment", "purchase", "price", "💰", "📣", "🟢"]
 
 # Database Functions
 def db_connect():
@@ -113,6 +119,21 @@ def load_blacklist():
     with conn.cursor() as cur:
         cur.execute("SELECT word FROM blacklist")
         blacklist_words = {row[0].lower() for row in cur.fetchall()}
+    
+    # Add critical spam words if not already in database
+    critical_words = ["cp", "child", "porn", "premium", "collection", "price", 
+                     "payment", "purchase", "desi", "indian", "foreign", "tamil",
+                     "chinese", "arabian", "bro-sis", "dad-daughter", "pedo"]
+    
+    for word in critical_words:
+        if word not in blacklist_words:
+            try:
+                cur.execute("INSERT INTO blacklist (word, added_by) VALUES (%s, %s) ON CONFLICT DO NOTHING", 
+                           (word, ADMIN_USER_ID))
+            except:
+                pass
+    
+    conn.commit()
     conn.close()
     logger.info(f"Loaded {len(blacklist_words)} words from blacklist")
 
@@ -131,7 +152,8 @@ def contains_hidden_links(text):
     patterns = [
         r'[🟢💰📣⬇️➖➗]+\s*[\w\s]+\s*[🟢💰📣⬇️➖➗]+',
         r'[\w\.-]+\.[a-zA-Z]{2,}',
-        r'@[\w]+\s*[\w]*\s*(offer|deal|price|sale)'
+        r'@[\w]+\s*[\w]*\s*(offer|deal|price|sale)',
+        r'http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\\(\\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+'
     ]
     return any(re.search(pattern, text, re.IGNORECASE) for pattern in patterns)
 
@@ -141,6 +163,13 @@ def detect_spam_patterns(text):
         if re.search(pattern, text, re.IGNORECASE):
             return True, f"Spam pattern detected: {pattern}"
     return False, ""
+
+def normalize_text(text):
+    """Normalize text by removing special fonts and characters"""
+    # Remove special Unicode characters that might be used to bypass filters
+    normalized = re.sub(r'[^\w\s@\.\-$]', ' ', text)
+    normalized = re.sub(r'\s+', ' ', normalized).strip().lower()
+    return normalized
 
 # Custom command system
 async def handle_custom_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -323,8 +352,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     text = message.text or message.caption or ""
     text_lower = text.lower()
+    normalized_text = normalize_text(text)
     is_spam = False
     reason = ""
+
+    # Log the message for debugging
+    logger.info(f"Message from {user.id}: {text[:100]}...")
+    logger.info(f"Normalized: {normalized_text[:100]}...")
 
     # Strict Rules
     if any(entity.type in ['url', 'text_link'] for entity in message.entities or []):
@@ -340,8 +374,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_spam and (message.forward_from or message.forward_from_chat):
         is_spam, reason = True, "Forwarded messages are not allowed"
     
-    # Dynamic Blacklist
-    if not is_spam and any(word in text_lower for word in blacklist_words):
+    # Dynamic Blacklist - check both original and normalized text
+    if not is_spam and (any(word in text_lower for word in blacklist_words) or 
+                       any(word in normalized_text for word in blacklist_words)):
         is_spam, reason = True, "Blacklisted word detected"
     
     # Payment terms detection
@@ -354,13 +389,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if pattern_detected:
             is_spam, reason = True, pattern_reason
     
-    # AI Analysis for messages (even shorter ones)
-    if not is_spam and text and len(text) > 10:
+    # AI Analysis for ALL messages (even short ones)
+    if not is_spam and text:
         try:
+            # Use both original and normalized text for better detection
+            analysis_text = f"Original: {text}\nNormalized: {normalized_text}"
             response = await asyncio.wait_for(
-                spam_model.generate_content_async(text),
-                timeout=5.0
+                spam_model.generate_content_async(analysis_text),
+                timeout=7.0  # Increased timeout for better analysis
             )
+            logger.info(f"AI Response: {response.text}")
             if "SPAM" in response.text.upper():
                 is_spam, reason = True, "AI detected spam content"
         except Exception as e:
@@ -415,7 +453,7 @@ def main():
     # Message handler
     application.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_message))
 
-    logger.info("🛡️ Guardian Bot is now running...")
+    logger.info("🛡️ Guardian Bot is now running with enhanced detection...")
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":

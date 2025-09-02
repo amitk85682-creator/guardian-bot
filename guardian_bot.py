@@ -233,32 +233,26 @@ async def report_spam(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.info(f"Spam reported by user {update.effective_user.id}: {spam_message[:50]}...")
 
 # Allow chat command - FIXED
-async def allowchat(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # FIXED: String comparison for user IDs
+# Naya aur aasan command
+async def allowthischat(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Admin check
     if str(update.effective_user.id) != str(ADMIN_USER_ID):
-        await update.message.reply_text(f"❌ Only admin can allow chats (Your ID: {update.effective_user.id}, Admin ID: {ADMIN_USER_ID})")
+        await update.message.reply_text("❌ Only admin can use this command.")
         return
-        
-    if not context.args:
-        await update.message.reply_text("Usage: /allowchat <chat_id>")
-        return
-        
-    try:
-        chat_id = int(context.args[0])
-        conn = db_connect()
-        with conn.cursor() as cur:
-            cur.execute(
-                "INSERT INTO allowed_chats (chat_id, added_by) VALUES (%s, %s) ON CONFLICT DO NOTHING",
-                (chat_id, update.effective_user.id)
-            )
-        conn.commit()
-        conn.close()
-        
-        # Update in-memory set
-        allowed_chats.add(chat_id)
-        
-        await update.message.reply_text(f"✅ Chat {chat_id} added to allowed list")
-        logger.info(f"Chat {chat_id} allowed by admin {update.effective_user.id}")
+
+    chat_id = update.effective_chat.id
+    
+    conn = db_connect()
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO allowed_chats (chat_id, added_by) VALUES (%s, %s) ON CONFLICT DO NOTHING",
+            (chat_id, update.effective_user.id)
+        )
+    conn.commit()
+    conn.close()
+    
+    allowed_chats.add(chat_id)
+    await update.message.reply_text(f"✅ Okay! I will now be active in this chat (ID: {chat_id}).")
     except ValueError:
         await update.message.reply_text("❌ Invalid chat ID. Must be a number.")
 
@@ -503,6 +497,7 @@ def main():
     application.add_handler(CommandHandler("report", report_spam))
     application.add_handler(CommandHandler("allowchat", allowchat))
     application.add_handler(CommandHandler("listchats", listchats))
+    application.add_handler(CommandHandler("allowthischat", allowthischat)) # YEH LINE ADD KAREIN
     
     # Custom commands handler (must be after specific commands)
     application.add_handler(MessageHandler(

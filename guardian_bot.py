@@ -1,6 +1,8 @@
 import os
 import threading
 import asyncio
+import re
+import logging
 from flask import Flask
 import google.generativeai as genai
 from telegram import Update
@@ -16,6 +18,13 @@ ADMIN_USER_ID = int(os.environ.get("ADMIN_USER_ID", 0))
 DATABASE_URL = os.environ.get("DATABASE_URL")
 PORT = int(os.environ.get('PORT', 8080))
 
+# Setup logging
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
+logger = logging.getLogger(__name__)
+
 # AI Setup for Spam Detection
 SPAM_DETECTION_PROMPT = """You are a vigilant spam detection AI for Telegram. Analyze messages and:
 1. Reply with "SPAM" if it contains promotions, scams, ads, or suspicious links
@@ -29,6 +38,27 @@ user_warnings = defaultdict(int)
 user_last_message = defaultdict(datetime)
 blacklist_words = set()
 allowed_chats = set()
+
+# Advanced spam patterns
+spam_patterns = [
+    r"lowest price",
+    r"premium collection",
+    r"dm for purchase",
+    r"payment method",
+    r"combo no\d",
+    r"latest updated",
+    r"desi cp",
+    r"indian cp",
+    r"foreign cp",
+    r"tamil cp",
+    r"chinese cp",
+    r"arabians cp",
+    r"bro-sis cp",
+    r"dad-daughter cp",
+    r"pedo mom-son cp"
+]
+
+payment_terms = ["upi", "paypal", "crypto", "gift card", "payment", "purchase", "price"]
 
 # Database Functions
 def db_connect():
@@ -65,6 +95,15 @@ def setup_database():
                 added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        # Reported spam table
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS reported_spam (
+                id SERIAL PRIMARY KEY,
+                message TEXT NOT NULL,
+                reported_by INTEGER,
+                reported_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
     conn.commit()
     conn.close()
 
@@ -75,7 +114,7 @@ def load_blacklist():
         cur.execute("SELECT word FROM blacklist")
         blacklist_words = {row[0].lower() for row in cur.fetchall()}
     conn.close()
-    print(f"Loaded {len(blacklist_words)} words from blacklist")
+    logger.info(f"Loaded {len(blacklist_words)} words from blacklist")
 
 def load_allowed_chats():
     global allowed_chats
@@ -84,7 +123,24 @@ def load_allowed_chats():
         cur.execute("SELECT chat_id FROM allowed_chats")
         allowed_chats = {row[0] for row in cur.fetchall()}
     conn.close()
-    print(f"Loaded {len(allowed_chats)} allowed chats")
+    logger.info(f"Loaded {len(allowed_chats)} allowed chats")
+
+# Advanced detection functions
+def contains_hidden_links(text):
+    """Detect hidden links and special patterns"""
+    patterns = [
+        r'[🟢💰📣⬇️➖➗]+\s*[\w\s]+\s*[🟢💰📣⬇️➖➗]+',
+        r'[\w\.-]+\.[a-zA-Z]{2,}',
+        r'@[\w]+\s*[\w]*\s*(offer|deal|price|sale)'
+    ]
+    return any(re.search(pattern, text, re.IGNORECASE) for pattern in patterns)
+
+def detect_spam_patterns(text):
+    """Detect common spam patterns using regex"""
+    for pattern in spam_patterns:
+        if re.search(pattern, text, re.IGNORECASE):
+            return True, f"Spam pattern detected: {pattern}"
+    return False, ""
 
 # Custom command system
 async def handle_custom_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -124,6 +180,27 @@ async def addcommand(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(f"❌ Command /{command} already exists")
     conn.close()
 
+# Spam reporting command
+async def report_spam(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Allow users to report spam messages"""
+    if not update.message.reply_to_message:
+        await update.message.reply_text("❌ Please reply to a spam message to report it.")
+        return
+        
+    spam_message = update.message.reply_to_message.text or update.message.reply_to_message.caption or ""
+    
+    conn = db_connect()
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO reported_spam (message, reported_by) VALUES (%s, %s)",
+            (spam_message, update.effective_user.id)
+        )
+    conn.commit()
+    conn.close()
+    
+    await update.message.reply_text("✅ Spam reported! Thank you for helping improve our protection.")
+    logger.info(f"Spam reported by user {update.effective_user.id}: {spam_message[:50]}...")
+
 # Flask App for Keep-Alive
 flask_app = Flask(__name__)
 
@@ -157,12 +234,16 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     /allowchat <chat_id> - Allow a chat to use bot
     /stats - Show protection statistics
     
+    👥 *User Commands:*
+    /report - Reply to a spam message to report it
+    
     ⚙️ *Features:*
     • AI-powered spam detection
     • Blacklist system
     • Flood protection
     • Link prevention
     • Auto-moderation
+    • Advanced pattern detection
     """
     await update.message.reply_text(help_text, parse_mode='Markdown')
 
@@ -228,7 +309,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await message.delete()
         return
     user_last_message[user.id] = now
-
     
     # Skip admin checks in private chats
     if chat_id > 0:
@@ -249,8 +329,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Strict Rules
     if any(entity.type in ['url', 'text_link'] for entity in message.entities or []):
         is_spam, reason = True, "Links are not allowed"
+    
+    # Unicode and special character detection
+    if not is_spam and contains_hidden_links(text):
+        is_spam, reason = True, "Hidden links detected"
+    
     if not is_spam and '@' in text and not text.startswith('/'):
         is_spam, reason = True, "Mentions are not allowed"
+    
     if not is_spam and (message.forward_from or message.forward_from_chat):
         is_spam, reason = True, "Forwarded messages are not allowed"
     
@@ -258,8 +344,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_spam and any(word in text_lower for word in blacklist_words):
         is_spam, reason = True, "Blacklisted word detected"
     
-    # AI Analysis for longer messages
-    if not is_spam and text and len(text) > 15:
+    # Payment terms detection
+    if not is_spam and any(term in text_lower for term in payment_terms):
+        is_spam, reason = True, "Payment terms detected"
+    
+    # Advanced pattern detection
+    if not is_spam:
+        pattern_detected, pattern_reason = detect_spam_patterns(text_lower)
+        if pattern_detected:
+            is_spam, reason = True, pattern_reason
+    
+    # AI Analysis for messages (even shorter ones)
+    if not is_spam and text and len(text) > 10:
         try:
             response = await asyncio.wait_for(
                 spam_model.generate_content_async(text),
@@ -268,7 +364,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if "SPAM" in response.text.upper():
                 is_spam, reason = True, "AI detected spam content"
         except Exception as e:
-            print(f"Gemini error: {e}")
+            logger.error(f"Gemini error: {e}")
 
     # Take Action
     if is_spam:
@@ -285,14 +381,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     parse_mode='HTML'
                 )
                 del user_warnings[user.id]
+                logger.info(f"User {user.id} banned for spam: {reason}")
             else:
                 await context.bot.send_message(
                     chat_id=chat_id,
                     text=f"⚠️ {user.mention_html()}, {reason}. Warning {warning_count}/3",
                     parse_mode='HTML'
                 )
+                logger.info(f"Spam detected from user {user.id}: {reason}")
         except Exception as e:
-            print(f"Action error: {e}")
+            logger.error(f"Action error: {e}")
 
 def main():
     # Setup and initialization
@@ -309,14 +407,15 @@ def main():
     application.add_handler(CommandHandler("addword", addword))
     application.add_handler(CommandHandler("addcommand", addcommand))
     application.add_handler(CommandHandler("stats", stats))
+    application.add_handler(CommandHandler("report", report_spam))
     
     # Custom commands handler (must be after specific commands)
-    application.add_handler(MessageHandler(filters.COMMAND & ~filters.Regex(r'^/(start|help|addword|addcommand|stats)'), handle_custom_command))
+    application.add_handler(MessageHandler(filters.COMMAND & ~filters.Regex(r'^/(start|help|addword|addcommand|stats|report)'), handle_custom_command))
     
     # Message handler
     application.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_message))
 
-    print("🛡️ Guardian Bot is now running...")
+    logger.info("🛡️ Guardian Bot is now running...")
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":

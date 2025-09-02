@@ -40,7 +40,7 @@ user_last_message = defaultdict(datetime)
 blacklist_words = set()
 allowed_chats = set()
 
-# Advanced spam patterns - इन्हें डेटाबेस में भी जोड़ें
+# Advanced spam patterns
 spam_patterns = [
     r"lowest price",
     r"premium collection",
@@ -73,7 +73,6 @@ def db_connect():
 def setup_database():
     conn = db_connect()
     with conn.cursor() as cur:
-        # Blacklist table
         cur.execute("""
             CREATE TABLE IF NOT EXISTS blacklist (
                 id SERIAL PRIMARY KEY,
@@ -82,7 +81,6 @@ def setup_database():
                 added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
-        # Allowed chats table
         cur.execute("""
             CREATE TABLE IF NOT EXISTS allowed_chats (
                 id SERIAL PRIMARY KEY,
@@ -91,7 +89,6 @@ def setup_database():
                 added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
-        # Custom commands table
         cur.execute("""
             CREATE TABLE IF NOT EXISTS custom_commands (
                 id SERIAL PRIMARY KEY,
@@ -101,7 +98,6 @@ def setup_database():
                 added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
-        # Reported spam table
         cur.execute("""
             CREATE TABLE IF NOT EXISTS reported_spam (
                 id SERIAL PRIMARY KEY,
@@ -119,23 +115,34 @@ def load_blacklist():
     with conn.cursor() as cur:
         cur.execute("SELECT word FROM blacklist")
         blacklist_words = {row[0].lower() for row in cur.fetchall()}
-    
-    # Add critical spam words if not already in database
-    critical_words = ["cp", "child", "porn", "premium", "collection", "price", 
-                     "payment", "purchase", "desi", "indian", "foreign", "tamil",
-                     "chinese", "arabian", "bro-sis", "dad-daughter", "pedo"]
-    
-    for word in critical_words:
-        if word not in blacklist_words:
-            try:
-                cur.execute("INSERT INTO blacklist (word, added_by) VALUES (%s, %s) ON CONFLICT DO NOTHING", 
-                           (word, ADMIN_USER_ID))
-            except:
-                pass
-    
+
+        # Critical words
+        critical_words = ["cp", "child", "porn", "premium", "collection", "price",
+                          "payment", "purchase", "desi", "indian", "foreign", "tamil",
+                          "chinese", "arabian", "bro-sis", "dad-daughter", "pedo"]
+
+        for word in critical_words:
+            if word not in blacklist_words:
+                try:
+                    cur.execute(
+                        "INSERT INTO blacklist (word, added_by) VALUES (%s, %s) ON CONFLICT DO NOTHING",
+                        (word, ADMIN_USER_ID)
+                    )
+                except:
+                    pass
+
     conn.commit()
     conn.close()
     logger.info(f"Loaded {len(blacklist_words)} words from blacklist")
+
+def load_allowed_chats():
+    global allowed_chats
+    conn = db_connect()
+    with conn.cursor() as cur:
+        cur.execute("SELECT chat_id FROM allowed_chats")
+        allowed_chats = {row[0] for row in cur.fetchall()}
+    conn.close()
+    logger.info(f"Loaded {len(allowed_chats)} allowed chats")
 
 def load_allowed_chats():
     global allowed_chats

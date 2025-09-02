@@ -218,9 +218,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     message = update.message
     
-    # Check if chat is allowed
+    # Check if chat is allowed - SILENTLY IGNORE UNAUTHORIZED CHATS
     if chat_id not in allowed_chats:
-        await update.message.reply_text("❌ This chat is not authorized to use this bot")
         return
     
     # Flood protection
@@ -229,6 +228,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await message.delete()
         return
     user_last_message[user.id] = now
+
     
     # Skip admin checks in private chats
     if chat_id > 0:

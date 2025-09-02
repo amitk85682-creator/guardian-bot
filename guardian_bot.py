@@ -14,7 +14,7 @@ from datetime import datetime
 # Configuration
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
-ADMIN_USER_ID = int(os.environ.get("ADMIN_USER_ID", 0))
+ADMIN_USER_ID = int(str(os.environ.get("ADMIN_USER_ID", "0")).strip())
 DATABASE_URL = os.environ.get("DATABASE_URL")
 PORT = int(os.environ.get('PORT', 8080))
 

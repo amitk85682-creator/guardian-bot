@@ -14,7 +14,7 @@ from datetime import datetime
 # Configuration
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
-ADMIN_USER_ID = int(str(os.environ.get("ADMIN_USER_ID", "0")).strip())
+ADMIN_USER_ID = int(os.environ.get("ADMIN_USER_ID", "0").strip())  # Fixed: added strip()
 DATABASE_URL = os.environ.get("DATABASE_URL")
 PORT = int(os.environ.get('PORT', 8080))
 
@@ -40,7 +40,7 @@ user_last_message = defaultdict(datetime)
 blacklist_words = set()
 allowed_chats = set()
 
-# Advanced spam patterns
+# Advanced spam patterns - इन्हें डेटाबेस में भी जोड़ें
 spam_patterns = [
     r"lowest price",
     r"premium collection",
@@ -73,6 +73,7 @@ def db_connect():
 def setup_database():
     conn = db_connect()
     with conn.cursor() as cur:
+        # Blacklist table
         cur.execute("""
             CREATE TABLE IF NOT EXISTS blacklist (
                 id SERIAL PRIMARY KEY,
@@ -81,6 +82,7 @@ def setup_database():
                 added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        # Allowed chats table
         cur.execute("""
             CREATE TABLE IF NOT EXISTS allowed_chats (
                 id SERIAL PRIMARY KEY,
@@ -89,6 +91,7 @@ def setup_database():
                 added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        # Custom commands table
         cur.execute("""
             CREATE TABLE IF NOT EXISTS custom_commands (
                 id SERIAL PRIMARY KEY,
@@ -98,6 +101,7 @@ def setup_database():
                 added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        # Reported spam table
         cur.execute("""
             CREATE TABLE IF NOT EXISTS reported_spam (
                 id SERIAL PRIMARY KEY,
@@ -115,34 +119,24 @@ def load_blacklist():
     with conn.cursor() as cur:
         cur.execute("SELECT word FROM blacklist")
         blacklist_words = {row[0].lower() for row in cur.fetchall()}
-
-        # Critical words
-        critical_words = ["cp", "child", "porn", "premium", "collection", "price",
-                          "payment", "purchase", "desi", "indian", "foreign", "tamil",
-                          "chinese", "arabian", "bro-sis", "dad-daughter", "pedo"]
-
-        for word in critical_words:
-            if word not in blacklist_words:
-                try:
-                    cur.execute(
-                        "INSERT INTO blacklist (word, added_by) VALUES (%s, %s) ON CONFLICT DO NOTHING",
-                        (word, ADMIN_USER_ID)
-                    )
-                except:
-                    pass
-
-    conn.commit()
-    conn.close()
+    
+    # Add critical spam words if not already in database
+    critical_words = ["cp", "child", "porn", "premium", "collection", "price", 
+                     "payment", "purchase", "desi", "indian", "foreign", "tamil",
+                     "chinese", "arabian", "bro-sis", "dad-daughter", "pedo"]
+    
+    for word in critical_words:
+        if word not in blacklist_words:
+            try:
+                with db_connect() as conn:
+                    with conn.cursor() as cur:
+                        cur.execute("INSERT INTO blacklist (word, added_by) VALUES (%s, %s) ON CONFLICT DO NOTHING", 
+                                   (word, ADMIN_USER_ID))
+                        conn.commit()
+            except:
+                pass
+    
     logger.info(f"Loaded {len(blacklist_words)} words from blacklist")
-
-def load_allowed_chats():
-    global allowed_chats
-    conn = db_connect()
-    with conn.cursor() as cur:
-        cur.execute("SELECT chat_id FROM allowed_chats")
-        allowed_chats = {row[0] for row in cur.fetchall()}
-    conn.close()
-    logger.info(f"Loaded {len(allowed_chats)} allowed chats")
 
 def load_allowed_chats():
     global allowed_chats
@@ -192,7 +186,8 @@ async def handle_custom_command(update: Update, context: ContextTypes.DEFAULT_TY
 
 # Admin commands for custom commands
 async def addcommand(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_USER_ID:
+    # FIXED: String comparison for user IDs
+    if str(update.effective_user.id) != str(ADMIN_USER_ID):
         await update.message.reply_text("❌ Only admin can add commands")
         return
         
@@ -237,10 +232,11 @@ async def report_spam(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("✅ Spam reported! Thank you for helping improve our protection.")
     logger.info(f"Spam reported by user {update.effective_user.id}: {spam_message[:50]}...")
 
-# Allow chat command
+# Allow chat command - FIXED
 async def allowchat(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_USER_ID:
-        await update.message.reply_text("❌ Only admin can allow chats")
+    # FIXED: String comparison for user IDs
+    if str(update.effective_user.id) != str(ADMIN_USER_ID):
+        await update.message.reply_text(f"❌ Only admin can allow chats (Your ID: {update.effective_user.id}, Admin ID: {ADMIN_USER_ID})")
         return
         
     if not context.args:
@@ -268,7 +264,8 @@ async def allowchat(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # List allowed chats command
 async def listchats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_USER_ID:
+    # FIXED: String comparison for user IDs
+    if str(update.effective_user.id) != str(ADMIN_USER_ID):
         await update.message.reply_text("❌ Only admin can view allowed chats")
         return
         
@@ -299,7 +296,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_USER_ID:
+    # FIXED: String comparison for user IDs
+    if str(update.effective_user.id) != str(ADMIN_USER_ID):
         await update.message.reply_text("❌ Only admin can use this command")
         return
         
@@ -327,7 +325,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(help_text, parse_mode='Markdown')
 
 async def addword(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_USER_ID:
+    # FIXED: String comparison for user IDs
+    if str(update.effective_user.id) != str(ADMIN_USER_ID):
         await update.message.reply_text("❌ Only admin can add words")
         return
         
@@ -355,7 +354,8 @@ async def addword(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"✅ Added {added_count} word(s) to blacklist")
 
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_USER_ID:
+    # FIXED: String comparison for user IDs
+    if str(update.effective_user.id) != str(ADMIN_USER_ID):
         await update.message.reply_text("❌ Only admin can view stats")
         return
         
@@ -391,18 +391,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     # Skip admin checks in private chats
     if chat_id > 0:
-        if user.id == ADMIN_USER_ID:
+        if str(user.id) == str(ADMIN_USER_ID):  # FIXED: String comparison
             return
     else:
         # For group chats, check if user is admin
         try:
             chat_admins = await context.bot.get_chat_administrators(chat_id)
             admin_ids = {admin.user.id for admin in chat_admins}
-            if user.id in admin_ids or user.id == ADMIN_USER_ID:
+            if user.id in admin_ids or str(user.id) == str(ADMIN_USER_ID):  # FIXED: String comparison
                 return
         except Exception as e:
             logger.error(f"Error checking admin status: {e}")
-            if user.id == ADMIN_USER_ID:
+            if str(user.id) == str(ADMIN_USER_ID):  # FIXED: String comparison
                 return
     
     text = message.text or message.caption or ""

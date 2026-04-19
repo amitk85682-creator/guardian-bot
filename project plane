@@ -1,0 +1,1209 @@
+🎯 PROJECT OVERVIEW
+Build a JARVIS-inspired AI Desktop Assistant called "NIYATI" — a fully interactive, voice-driven AI assistant with a live HeyGen avatar video interface (like a real video call), powered by Google Gemini as the AI brain. The user should be able to talk to NIYATI, see her respond via a realistic animated avatar, and she should be able to perform tasks on the laptop.
+Personality: Professional, intelligent, slightly warm — like Jarvis from Iron Man but with a female identity.
+
+🔧 ENVIRONMENT VARIABLES
+Create a .env file in the root of the project with these values (user will fill them in):
+GEMINI_API_KEY="AIzaSyCVboK9SsfWbEoLyNTOEWRuyQc8QlHmWBk"
+HEYGEN_API_KEY="sk_V2_hgu_kaO9yooL9om_GvDNNOriqQkeLusoIqDMy8OCeFtAUsCV"
+HEYGEN_AVATAR_ID="5565643f371d4fcbbd9a96d6562f1e4d"
+APP_URL="http://localhost:3000"
+HEYGEN_VOICE_ID="6255f703bfd94afe810f06d3186a9353"
+APP_URL=http://localhost:3000
+PORT=3000
+
+🏗️ TECH STACK
+LayerTechnologyBackendNode.js + Express.jsAI BrainGoogle Gemini 1.5 Pro API (@google/generative-ai)Avatar VideoHeyGen Streaming Avatar API (WebRTC)Voice InputWeb Speech API (browser built-in)FrontendVanilla HTML + CSS + JavaScript (single file index.html)Real-timeWebSocket (ws library) for backend↔frontend communicationSystem TasksNode.js child_process, fs, open packages
+
+📁 FINAL PROJECT STRUCTURE
+niyati-assistant/
+├── .env
+├── package.json
+├── server.js              ← Main Express + WebSocket server
+├── gemini.js              ← Gemini AI logic
+├── heygen.js              ← HeyGen Streaming Avatar logic
+├── tools.js               ← System task tools (open apps, files, search)
+├── public/
+│   └── index.html         ← Entire frontend (HTML + CSS + JS in one file)
+└── README.md
+
+📦 STEP 1 — PROJECT INITIALIZATION
+Run these commands exactly:
+bashmkdir niyati-assistant
+cd niyati-assistant
+npm init -y
+npm install express ws dotenv @google/generative-ai axios cors node-fetch open
+Create the .env file with the variables listed above.
+
+🖥️ STEP 2 — BUILD server.js (Main Server)
+Create server.js. This file must:
+
+Load .env using dotenv
+Start an Express HTTP server on the port from .env
+Serve the public/ folder as static files
+Start a WebSocket server on the same HTTP server
+On each WebSocket connection:
+
+Listen for JSON messages from the frontend
+Each message has a type field: "chat", "start_avatar", "stop_avatar", "task"
+Route messages to the appropriate handler
+Send responses back as JSON over the WebSocket
+
+
+
+javascript// server.js — Full implementation:
+
+require('dotenv').config();
+const express = require('express');
+const http = require('http');
+const WebSocket = require('ws');
+const path = require('path');
+const { askGemini, resetConversation } = require('./gemini');
+const { createHeyGenSession, sendAvatarText, closeHeyGenSession } = require('./heygen');
+const { executeTool } = require('./tools');
+
+const app = express();
+app.use(cors());  // import cors at top
+app.use(express.json());
+app.use(express.static(path.join(__dirname, 'public')));
+
+const server = http.createServer(app);
+const wss = new WebSocket.Server({ server });
+
+// Store active HeyGen sessions per client
+const sessions = new Map();
+
+wss.on('connection', (ws) => {
+  console.log('Client connected');
+  const clientId = Date.now().toString();
+
+  ws.on('message', async (raw) => {
+    let msg;
+    try { msg = JSON.parse(raw); } catch { return; }
+
+    if (msg.type === 'chat') {
+      try {
+        // 1. Get AI response from Gemini
+        const aiResponse = await askGemini(msg.text, clientId);
+        
+        // 2. Send text response to frontend immediately
+        ws.send(JSON.stringify({ type: 'ai_text', text: aiResponse }));
+
+        // 3. If avatar session is active, make avatar speak
+        const session = sessions.get(clientId);
+        if (session) {
+          await sendAvatarText(session, aiResponse);
+        }
+
+        // 4. Check if Gemini flagged a tool/task to execute
+        if (aiResponse.includes('[TOOL:')) {
+          const toolMatch = aiResponse.match(/\[TOOL:(\w+):([^\]]+)\]/);
+          if (toolMatch) {
+            const result = await executeTool(toolMatch[1], toolMatch[2]);
+            ws.send(JSON.stringify({ type: 'tool_result', result }));
+          }
+        }
+      } catch (err) {
+        ws.send(JSON.stringify({ type: 'error', message: err.message }));
+      }
+    }
+
+    if (msg.type === 'start_avatar') {
+      try {
+        const session = await createHeyGenSession();
+        sessions.set(clientId, session);
+        ws.send(JSON.stringify({ 
+          type: 'avatar_ready', 
+          sessionId: session.session_id,
+          sdp: session.sdp,
+          iceServers: session.ice_servers
+        }));
+      } catch (err) {
+        ws.send(JSON.stringify({ type: 'error', message: 'Avatar failed: ' + err.message }));
+      }
+    }
+
+    if (msg.type === 'stop_avatar') {
+      const session = sessions.get(clientId);
+      if (session) {
+        await closeHeyGenSession(session);
+        sessions.delete(clientId);
+        ws.send(JSON.stringify({ type: 'avatar_stopped' }));
+      }
+    }
+
+    if (msg.type === 'reset') {
+      resetConversation(clientId);
+      ws.send(JSON.stringify({ type: 'reset_done' }));
+    }
+  });
+
+  ws.on('close', async () => {
+    const session = sessions.get(clientId);
+    if (session) await closeHeyGenSession(session).catch(() => {});
+    sessions.delete(clientId);
+    console.log('Client disconnected');
+  });
+});
+
+const PORT = process.env.PORT || 3000;
+server.listen(PORT, () => {
+  console.log(`✅ NIYATI is running at http://localhost:${PORT}`);
+});
+NOTE: Actually write this as real, complete, runnable code — no pseudocode. Import cors at the top (const cors = require('cors')).
+
+🤖 STEP 3 — BUILD gemini.js (AI Brain)
+This file handles all communication with Google Gemini 1.5 Pro. It must:
+
+Maintain conversation history per client (multi-turn memory)
+Use a detailed system prompt that defines NIYATI's personality
+Detect when the user wants to perform a system task and embed a [TOOL:name:args] tag in the response
+Export: askGemini(userText, clientId) and resetConversation(clientId)
+
+javascript// gemini.js — Full implementation:
+
+const { GoogleGenerativeAI } = require('@google/generative-ai');
+
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+
+const SYSTEM_PROMPT = `
+You are NIYATI, an advanced AI assistant — intelligent, calm, and precise like JARVIS from Iron Man.
+You assist the user with tasks on their laptop and answer any question with deep knowledge.
+
+YOUR PERSONALITY:
+- Speak in a warm but professional tone
+- Be concise — avoid rambling. Give clear, direct answers
+- Address the user as "Sir" or "Ma'am" occasionally (be subtle, not robotic)
+- Show subtle wit and intelligence
+- If user speaks in Hindi or Hinglish, respond in the same language naturally
+
+YOUR CAPABILITIES — when the user asks you to perform these tasks, include a [TOOL:...] tag:
+- Open a website: respond with [TOOL:open_url:https://example.com]
+- Search the web: respond with [TOOL:search:query text here]
+- Open an application: respond with [TOOL:open_app:appname]
+- Create a file: respond with [TOOL:create_file:filename|content]
+- Get current time/date: respond with [TOOL:get_time:now]
+
+IMPORTANT RULES:
+1. Always give a natural conversational response FIRST, then add the [TOOL:...] tag at the very end if needed
+2. Never expose raw technical details unless asked
+3. If you don't know something, say so honestly
+4. Keep responses under 3 sentences for simple questions; be detailed only when needed
+5. You have access to conversation history — remember what was said earlier
+`;
+
+// Store conversation history: clientId → array of {role, parts}
+const histories = new Map();
+
+async function askGemini(userText, clientId) {
+  if (!histories.has(clientId)) {
+    histories.set(clientId, []);
+  }
+  const history = histories.get(clientId);
+
+  const model = genAI.getGenerativeModel({ 
+    model: 'gemini-1.5-pro',
+    systemInstruction: SYSTEM_PROMPT
+  });
+
+  const chat = model.startChat({ history });
+
+  const result = await chat.sendMessage(userText);
+  const responseText = result.response.text();
+
+  // Update history
+  history.push({ role: 'user', parts: [{ text: userText }] });
+  history.push({ role: 'model', parts: [{ text: responseText }] });
+
+  // Keep last 20 turns to avoid token overflow
+  if (history.length > 40) history.splice(0, 2);
+
+  return responseText;
+}
+
+function resetConversation(clientId) {
+  histories.delete(clientId);
+}
+
+module.exports = { askGemini, resetConversation };
+Write this as complete, runnable code.
+
+🎭 STEP 4 — BUILD heygen.js (Live Avatar)
+This file manages the HeyGen Streaming Avatar API. It must:
+
+Create a streaming session using HeyGen's API
+Return the WebRTC SDP and ICE server details to the frontend
+Send text to the avatar to speak in real-time
+Close the session cleanly
+
+Use HeyGen's v2 Streaming API endpoints:
+
+Create session: POST https://api.heygen.com/v1/streaming.new
+Start session: POST https://api.heygen.com/v1/streaming.start
+Send task (speak text): POST https://api.heygen.com/v1/streaming.task
+Stop session: POST https://api.heygen.com/v1/streaming.stop
+
+javascript// heygen.js — Full implementation:
+
+const axios = require('axios');
+
+const HEYGEN_BASE = 'https://api.heygen.com';
+const HEADERS = {
+  'x-api-key': process.env.HEYGEN_API_KEY,
+  'Content-Type': 'application/json'
+};
+
+async function createHeyGenSession() {
+  // Step 1: Create a new streaming session
+  const createRes = await axios.post(`${HEYGEN_BASE}/v1/streaming.new`, {
+    quality: 'high',
+    avatar_name: process.env.HEYGEN_AVATAR_ID,
+    voice: {
+      voice_id: process.env.HEYGEN_VOICE_ID
+    },
+    video_encoding: 'H264',
+    knowledge_base: '',
+    disable_idle_timeout: false
+  }, { headers: HEADERS });
+
+  if (createRes.data.code !== 100) {
+    throw new Error('HeyGen session creation failed: ' + JSON.stringify(createRes.data));
+  }
+
+  const sessionData = createRes.data.data;
+  
+  return {
+    session_id: sessionData.session_id,
+    sdp: sessionData.sdp,           // SDP offer from HeyGen
+    ice_servers: sessionData.ice_servers,
+    access_token: sessionData.access_token
+  };
+}
+
+async function startHeyGenSession(session, clientSdpAnswer) {
+  // Step 2: Start session with client's SDP answer
+  const startRes = await axios.post(`${HEYGEN_BASE}/v1/streaming.start`, {
+    session_id: session.session_id,
+    sdp: clientSdpAnswer
+  }, { headers: HEADERS });
+
+  if (startRes.data.code !== 100) {
+    throw new Error('HeyGen session start failed: ' + JSON.stringify(startRes.data));
+  }
+  return startRes.data;
+}
+
+async function sendAvatarText(session, text) {
+  // Clean the text — remove [TOOL:...] tags before speaking
+  const cleanText = text.replace(/\[TOOL:[^\]]+\]/g, '').trim();
+  if (!cleanText) return;
+
+  const taskRes = await axios.post(`${HEYGEN_BASE}/v1/streaming.task`, {
+    session_id: session.session_id,
+    text: cleanText,
+    task_type: 'talk'
+  }, { headers: HEADERS });
+
+  if (taskRes.data.code !== 100) {
+    console.error('HeyGen task failed:', taskRes.data);
+  }
+  return taskRes.data;
+}
+
+async function closeHeyGenSession(session) {
+  await axios.post(`${HEYGEN_BASE}/v1/streaming.stop`, {
+    session_id: session.session_id
+  }, { headers: HEADERS }).catch(console.error);
+}
+
+module.exports = { createHeyGenSession, startHeyGenSession, sendAvatarText, closeHeyGenSession };
+Also update server.js to handle a new WebSocket message type "sdp_answer" from the frontend:
+javascriptif (msg.type === 'sdp_answer') {
+  const session = sessions.get(clientId);
+  if (session) {
+    await startHeyGenSession(session, msg.sdp);
+    ws.send(JSON.stringify({ type: 'avatar_started' }));
+  }
+}
+Import startHeyGenSession in server.js as well.
+
+🛠️ STEP 5 — BUILD tools.js (System Task Executor)
+This file handles real laptop tasks when Gemini embeds a [TOOL:...] command.
+javascript// tools.js — Full implementation:
+
+const { exec } = require('child_process');
+const fs = require('fs');
+const open = require('open');
+
+async function executeTool(toolName, args) {
+  console.log(`[TOOL] Executing: ${toolName} with args: ${args}`);
+
+  switch (toolName) {
+
+    case 'open_url': {
+      await open(args);
+      return `Opened ${args} in your default browser.`;
+    }
+
+    case 'search': {
+      const searchUrl = `https://www.google.com/search?q=${encodeURIComponent(args)}`;
+      await open(searchUrl);
+      return `Searching for "${args}" on Google.`;
+    }
+
+    case 'open_app': {
+      const appName = args.toLowerCase().trim();
+      // Cross-platform app opening
+      const platform = process.platform;
+      if (platform === 'win32') {
+        exec(`start ${appName}`);
+      } else if (platform === 'darwin') {
+        exec(`open -a "${appName}"`);
+      } else {
+        exec(`${appName} &`);
+      }
+      return `Opening ${args}...`;
+    }
+
+    case 'create_file': {
+      const [filename, ...contentParts] = args.split('|');
+      const content = contentParts.join('|');
+      const filePath = require('path').join(require('os').homedir(), 'Desktop', filename.trim());
+      fs.writeFileSync(filePath, content || '', 'utf8');
+      return `File "${filename.trim()}" created on your Desktop.`;
+    }
+
+    case 'get_time': {
+      const now = new Date();
+      return `Current time: ${now.toLocaleString()}`;
+    }
+
+    default:
+      return `Unknown tool: ${toolName}`;
+  }
+}
+
+module.exports = { executeTool };
+
+🎨 STEP 6 — BUILD public/index.html (Frontend UI)
+Create a single HTML file with all CSS and JavaScript inline. This is the most important part — it must look futuristic, like a real JARVIS interface.
+Design Requirements:
+
+Dark theme — deep space black background (#050810)
+Accent color: Electric cyan/blue (#00d4ff) with subtle glow effects
+Font: Orbitron (from Google Fonts) for headings, Rajdhani for body text — both imported via <link>
+Layout:
+
+Left panel: Chat history (messages scroll here)
+Center/Right panel: Large HeyGen avatar video (the "video call" window) with a circular border glow
+Bottom bar: Microphone button (large, pulsing when active) + text input field + Send button
+Top bar: "NIYATI" logo/title with a status indicator (ONLINE / LISTENING / PROCESSING)
+
+
+Animations:
+
+Mic button pulses with a ripple animation when listening
+AI text messages animate in with a typing effect
+Status indicator glows/blinks
+Background has subtle animated particle dots (pure CSS or canvas)
+
+
+Video: The HeyGen avatar stream plays inside a styled <video> element that looks like a holographic display
+
+Complete JavaScript logic in the HTML file must:
+
+Connect to WebSocket at ws://localhost:3000 on page load
+Handle WebSocket messages:
+
+avatar_ready → Set up WebRTC peer connection using the SDP + ICE servers, then send back sdp_answer
+ai_text → Display the text in chat with a typing animation
+tool_result → Show a subtle notification
+error → Show error toast
+avatar_stopped → Reset avatar UI
+
+
+Start Avatar button → Send { type: "start_avatar" } via WebSocket
+Stop Avatar button → Send { type: "stop_avatar" }
+WebRTC setup:
+
+Create RTCPeerConnection with ICE servers from HeyGen
+Set the remote SDP (offer from HeyGen)
+Create local answer SDP
+Send the answer back via WebSocket as { type: "sdp_answer", sdp: answer }
+When track event fires, attach the stream to the <video> element
+This gives the live avatar video stream
+
+
+Voice Input:
+
+Use window.SpeechRecognition (or webkitSpeechRecognition)
+Support both Hindi and English (lang: 'hi-IN' and en-US switchable)
+Mic button toggles listening on/off
+On result: auto-send to WebSocket as { type: "chat", text: transcript }
+
+
+Text Input:
+
+Allow typing and pressing Enter or clicking Send
+Send as { type: "chat", text: userInput }
+
+
+Chat display:
+
+User messages: right-aligned, cyan background
+AI messages: left-aligned, dark glass-morphism card, with typing animation
+
+
+Reconnect logic: If WebSocket disconnects, attempt auto-reconnect every 3 seconds
+
+Here is the complete HTML structure to implement:
+html<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>NIYATI — AI Assistant</title>
+  <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700;900&family=Rajdhani:wght@300;400;500;600&display=swap" rel="stylesheet">
+  <style>
+    /* === COMPLETE STYLES — implement every rule === */
+    
+    :root {
+      --bg: #050810;
+      --surface: #0a0f1e;
+      --surface2: #0f1628;
+      --cyan: #00d4ff;
+      --cyan-dim: #00d4ff33;
+      --cyan-glow: 0 0 20px #00d4ff66, 0 0 40px #00d4ff22;
+      --text: #e0eeff;
+      --text-dim: #7090b0;
+      --danger: #ff4466;
+      --success: #00ff88;
+    }
+
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: 'Rajdhani', sans-serif;
+      height: 100vh;
+      display: grid;
+      grid-template-rows: 60px 1fr 80px;
+      grid-template-columns: 380px 1fr;
+      overflow: hidden;
+    }
+
+    /* TOP BAR — spans full width */
+    #topbar {
+      grid-column: 1 / -1;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 24px;
+      background: var(--surface);
+      border-bottom: 1px solid var(--cyan-dim);
+    }
+
+    #logo {
+      font-family: 'Orbitron', monospace;
+      font-size: 22px;
+      font-weight: 900;
+      color: var(--cyan);
+      letter-spacing: 6px;
+      text-shadow: var(--cyan-glow);
+    }
+
+    #status-badge {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 13px;
+      letter-spacing: 2px;
+      color: var(--text-dim);
+    }
+
+    #status-dot {
+      width: 8px; height: 8px;
+      border-radius: 50%;
+      background: var(--success);
+      box-shadow: 0 0 8px var(--success);
+      animation: pulse-dot 2s infinite;
+    }
+
+    @keyframes pulse-dot {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.3; }
+    }
+
+    /* CHAT PANEL — left column */
+    #chat-panel {
+      background: var(--surface);
+      border-right: 1px solid var(--cyan-dim);
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    #chat-header {
+      padding: 16px 20px;
+      font-family: 'Orbitron', monospace;
+      font-size: 11px;
+      letter-spacing: 3px;
+      color: var(--cyan);
+      border-bottom: 1px solid var(--cyan-dim);
+    }
+
+    #messages {
+      flex: 1;
+      overflow-y: auto;
+      padding: 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      scrollbar-width: thin;
+      scrollbar-color: var(--cyan-dim) transparent;
+    }
+
+    .msg {
+      max-width: 90%;
+      padding: 10px 14px;
+      border-radius: 12px;
+      font-size: 15px;
+      line-height: 1.5;
+      animation: msg-in 0.3s ease;
+    }
+
+    @keyframes msg-in {
+      from { opacity: 0; transform: translateY(8px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+
+    .msg.user {
+      align-self: flex-end;
+      background: var(--cyan);
+      color: #050810;
+      font-weight: 600;
+      border-bottom-right-radius: 2px;
+    }
+
+    .msg.ai {
+      align-self: flex-start;
+      background: var(--surface2);
+      border: 1px solid var(--cyan-dim);
+      color: var(--text);
+      border-bottom-left-radius: 2px;
+    }
+
+    /* AVATAR PANEL — right column */
+    #avatar-panel {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 20px;
+      background: var(--bg);
+      position: relative;
+      overflow: hidden;
+    }
+
+    /* Animated background grid */
+    #avatar-panel::before {
+      content: '';
+      position: absolute;
+      inset: 0;
+      background-image: 
+        linear-gradient(var(--cyan-dim) 1px, transparent 1px),
+        linear-gradient(90deg, var(--cyan-dim) 1px, transparent 1px);
+      background-size: 40px 40px;
+      opacity: 0.3;
+      animation: grid-scroll 20s linear infinite;
+    }
+
+    @keyframes grid-scroll {
+      from { background-position: 0 0; }
+      to   { background-position: 40px 40px; }
+    }
+
+    #avatar-container {
+      position: relative;
+      z-index: 1;
+      width: 340px;
+      height: 480px;
+      border-radius: 20px;
+      border: 2px solid var(--cyan);
+      box-shadow: var(--cyan-glow), inset 0 0 40px #00d4ff0a;
+      overflow: hidden;
+      background: #000;
+    }
+
+    #avatar-video {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+    }
+
+    #avatar-placeholder {
+      width: 100%;
+      height: 100%;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 16px;
+      color: var(--text-dim);
+    }
+
+    #avatar-placeholder .avatar-icon {
+      font-size: 60px;
+      opacity: 0.4;
+    }
+
+    #avatar-controls {
+      position: relative;
+      z-index: 1;
+      display: flex;
+      gap: 12px;
+    }
+
+    .avatar-btn {
+      padding: 10px 20px;
+      border-radius: 8px;
+      border: 1px solid var(--cyan);
+      background: transparent;
+      color: var(--cyan);
+      font-family: 'Orbitron', monospace;
+      font-size: 11px;
+      letter-spacing: 2px;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+
+    .avatar-btn:hover {
+      background: var(--cyan);
+      color: var(--bg);
+      box-shadow: var(--cyan-glow);
+    }
+
+    .avatar-btn.danger {
+      border-color: var(--danger);
+      color: var(--danger);
+    }
+
+    .avatar-btn.danger:hover {
+      background: var(--danger);
+      color: white;
+    }
+
+    /* BOTTOM BAR — spans full width */
+    #bottom-bar {
+      grid-column: 1 / -1;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 0 20px;
+      background: var(--surface);
+      border-top: 1px solid var(--cyan-dim);
+    }
+
+    #mic-btn {
+      width: 48px; height: 48px;
+      border-radius: 50%;
+      border: 2px solid var(--cyan);
+      background: transparent;
+      color: var(--cyan);
+      font-size: 20px;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: all 0.2s;
+      flex-shrink: 0;
+      position: relative;
+    }
+
+    #mic-btn.listening {
+      background: var(--cyan);
+      color: var(--bg);
+      animation: mic-pulse 1.2s infinite;
+    }
+
+    @keyframes mic-pulse {
+      0%, 100% { box-shadow: 0 0 0 0 #00d4ff44; }
+      50%       { box-shadow: 0 0 0 16px transparent; }
+    }
+
+    #text-input {
+      flex: 1;
+      background: var(--surface2);
+      border: 1px solid var(--cyan-dim);
+      border-radius: 8px;
+      padding: 12px 16px;
+      color: var(--text);
+      font-family: 'Rajdhani', sans-serif;
+      font-size: 16px;
+      outline: none;
+      transition: border-color 0.2s;
+    }
+
+    #text-input:focus {
+      border-color: var(--cyan);
+    }
+
+    #text-input::placeholder {
+      color: var(--text-dim);
+    }
+
+    #send-btn {
+      padding: 12px 24px;
+      background: var(--cyan);
+      color: var(--bg);
+      border: none;
+      border-radius: 8px;
+      font-family: 'Orbitron', monospace;
+      font-size: 12px;
+      letter-spacing: 2px;
+      cursor: pointer;
+      font-weight: 700;
+      transition: all 0.2s;
+      flex-shrink: 0;
+    }
+
+    #send-btn:hover {
+      box-shadow: var(--cyan-glow);
+      transform: translateY(-1px);
+    }
+
+    /* LANG TOGGLE */
+    #lang-toggle {
+      padding: 8px 12px;
+      background: var(--surface2);
+      border: 1px solid var(--cyan-dim);
+      border-radius: 6px;
+      color: var(--text-dim);
+      font-family: 'Orbitron', monospace;
+      font-size: 10px;
+      letter-spacing: 1px;
+      cursor: pointer;
+      flex-shrink: 0;
+    }
+
+    /* TOAST NOTIFICATION */
+    #toast {
+      position: fixed;
+      bottom: 100px;
+      right: 24px;
+      padding: 12px 20px;
+      background: var(--surface2);
+      border: 1px solid var(--cyan);
+      border-radius: 8px;
+      color: var(--cyan);
+      font-size: 14px;
+      opacity: 0;
+      transform: translateY(10px);
+      transition: all 0.3s;
+      z-index: 999;
+      max-width: 300px;
+    }
+
+    #toast.show {
+      opacity: 1;
+      transform: translateY(0);
+    }
+
+    /* SCROLLBAR */
+    ::-webkit-scrollbar { width: 4px; }
+    ::-webkit-scrollbar-thumb { background: var(--cyan-dim); border-radius: 2px; }
+  </style>
+</head>
+<body>
+
+  <!-- TOP BAR -->
+  <div id="topbar">
+    <div id="logo">NIYATI</div>
+    <div id="status-badge">
+      <div id="status-dot"></div>
+      <span id="status-text">ONLINE</span>
+    </div>
+    <button id="reset-btn" class="avatar-btn" style="font-size:10px">RESET CHAT</button>
+  </div>
+
+  <!-- CHAT PANEL -->
+  <div id="chat-panel">
+    <div id="chat-header">// COMMUNICATION LOG</div>
+    <div id="messages">
+      <div class="msg ai">NIYATI online. How can I assist you today, Sir?</div>
+    </div>
+  </div>
+
+  <!-- AVATAR PANEL -->
+  <div id="avatar-panel">
+    <div id="avatar-container">
+      <video id="avatar-video" autoplay playsinline style="display:none"></video>
+      <div id="avatar-placeholder">
+        <div class="avatar-icon">👤</div>
+        <div style="font-family: Orbitron; font-size:12px; letter-spacing:3px;">AVATAR OFFLINE</div>
+        <div style="font-size:13px;">Click ACTIVATE to start video</div>
+      </div>
+    </div>
+    <div id="avatar-controls">
+      <button id="start-avatar-btn" class="avatar-btn">⬡ ACTIVATE AVATAR</button>
+      <button id="stop-avatar-btn" class="avatar-btn danger" style="display:none">■ DEACTIVATE</button>
+    </div>
+  </div>
+
+  <!-- BOTTOM BAR -->
+  <div id="bottom-bar">
+    <button id="mic-btn" title="Toggle voice input">🎤</button>
+    <input id="text-input" type="text" placeholder="Ask NIYATI anything..." />
+    <button id="lang-toggle">हि / EN</button>
+    <button id="send-btn">SEND</button>
+  </div>
+
+  <!-- TOAST -->
+  <div id="toast"></div>
+
+  <script>
+    // === COMPLETE JAVASCRIPT — implement all of this ===
+
+    const WS_URL = 'ws://localhost:3000';
+    let ws, peerConnection;
+    let isListening = false;
+    let voiceLang = 'en-US';
+    let recognition;
+
+    // --- WebSocket Connection ---
+    function connectWS() {
+      ws = new WebSocket(WS_URL);
+
+      ws.onopen = () => {
+        setStatus('ONLINE', '#00ff88');
+        showToast('NIYATI connected');
+      };
+
+      ws.onclose = () => {
+        setStatus('RECONNECTING...', '#ffaa00');
+        setTimeout(connectWS, 3000);
+      };
+
+      ws.onerror = () => {
+        setStatus('ERROR', '#ff4466');
+      };
+
+      ws.onmessage = (event) => {
+        const msg = JSON.parse(event.data);
+        handleWSMessage(msg);
+      };
+    }
+
+    function sendWS(obj) {
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify(obj));
+      }
+    }
+
+    // --- Handle incoming WS messages ---
+    function handleWSMessage(msg) {
+      if (msg.type === 'ai_text') {
+        addMessage('ai', msg.text.replace(/\[TOOL:[^\]]+\]/g, '').trim());
+        setStatus('ONLINE', '#00ff88');
+      }
+
+      if (msg.type === 'tool_result') {
+        showToast('⚡ ' + msg.result);
+      }
+
+      if (msg.type === 'error') {
+        showToast('Error: ' + msg.message, true);
+        setStatus('ONLINE', '#00ff88');
+      }
+
+      if (msg.type === 'avatar_ready') {
+        setupWebRTC(msg.sdp, msg.iceServers);
+      }
+
+      if (msg.type === 'avatar_started') {
+        showToast('Avatar stream started');
+        document.getElementById('avatar-placeholder').style.display = 'none';
+        document.getElementById('avatar-video').style.display = 'block';
+      }
+
+      if (msg.type === 'avatar_stopped') {
+        document.getElementById('avatar-placeholder').style.display = 'flex';
+        document.getElementById('avatar-video').style.display = 'none';
+        document.getElementById('start-avatar-btn').style.display = 'block';
+        document.getElementById('stop-avatar-btn').style.display = 'none';
+      }
+
+      if (msg.type === 'reset_done') {
+        document.getElementById('messages').innerHTML = 
+          '<div class="msg ai">Memory cleared. Fresh start. How can I assist you?</div>';
+        showToast('Conversation reset');
+      }
+    }
+
+    // --- WebRTC Setup for HeyGen Avatar ---
+    async function setupWebRTC(sdpOffer, iceServers) {
+      peerConnection = new RTCPeerConnection({ iceServers });
+
+      // When HeyGen sends video/audio tracks
+      peerConnection.ontrack = (event) => {
+        const video = document.getElementById('avatar-video');
+        if (event.streams && event.streams[0]) {
+          video.srcObject = event.streams[0];
+        }
+      };
+
+      // Set the offer from HeyGen
+      await peerConnection.setRemoteDescription(new RTCSessionDescription(sdpOffer));
+
+      // Create our answer
+      const answer = await peerConnection.createAnswer();
+      await peerConnection.setLocalDescription(answer);
+
+      // Send answer back
+      sendWS({ type: 'sdp_answer', sdp: peerConnection.localDescription });
+    }
+
+    // --- Chat UI ---
+    function addMessage(role, text) {
+      const msgs = document.getElementById('messages');
+      const div = document.createElement('div');
+      div.className = `msg ${role}`;
+      
+      if (role === 'ai') {
+        // Typing animation for AI
+        div.textContent = '';
+        msgs.appendChild(div);
+        let i = 0;
+        const interval = setInterval(() => {
+          div.textContent += text[i];
+          i++;
+          if (i >= text.length) clearInterval(interval);
+          msgs.scrollTop = msgs.scrollHeight;
+        }, 18);
+      } else {
+        div.textContent = text;
+        msgs.appendChild(div);
+        msgs.scrollTop = msgs.scrollHeight;
+      }
+    }
+
+    // --- Send Message ---
+    function sendMessage() {
+      const input = document.getElementById('text-input');
+      const text = input.value.trim();
+      if (!text) return;
+      addMessage('user', text);
+      input.value = '';
+      setStatus('PROCESSING...', '#ffaa00');
+      sendWS({ type: 'chat', text });
+    }
+
+    // --- Voice Input ---
+    function setupVoice() {
+      const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+      if (!SpeechRecognition) {
+        showToast('Voice not supported in this browser', true);
+        return;
+      }
+      recognition = new SpeechRecognition();
+      recognition.continuous = false;
+      recognition.interimResults = false;
+
+      recognition.onresult = (e) => {
+        const transcript = e.results[0][0].transcript;
+        addMessage('user', transcript);
+        setStatus('PROCESSING...', '#ffaa00');
+        sendWS({ type: 'chat', text: transcript });
+      };
+
+      recognition.onend = () => {
+        isListening = false;
+        document.getElementById('mic-btn').classList.remove('listening');
+        setStatus('ONLINE', '#00ff88');
+      };
+
+      recognition.onerror = (e) => {
+        showToast('Voice error: ' + e.error, true);
+        isListening = false;
+        document.getElementById('mic-btn').classList.remove('listening');
+      };
+    }
+
+    // --- Event Listeners ---
+    document.getElementById('send-btn').onclick = sendMessage;
+    document.getElementById('text-input').onkeydown = (e) => {
+      if (e.key === 'Enter' && !e.shiftKey) sendMessage();
+    };
+
+    document.getElementById('mic-btn').onclick = () => {
+      if (!recognition) { setupVoice(); }
+      if (!recognition) return;
+
+      if (isListening) {
+        recognition.stop();
+        isListening = false;
+      } else {
+        recognition.lang = voiceLang;
+        recognition.start();
+        isListening = true;
+        document.getElementById('mic-btn').classList.add('listening');
+        setStatus('LISTENING...', '#00d4ff');
+      }
+    };
+
+    document.getElementById('lang-toggle').onclick = () => {
+      voiceLang = voiceLang === 'en-US' ? 'hi-IN' : 'en-US';
+      showToast('Voice language: ' + (voiceLang === 'hi-IN' ? 'Hindi' : 'English'));
+    };
+
+    document.getElementById('start-avatar-btn').onclick = () => {
+      showToast('Initializing avatar...');
+      setStatus('LOADING AVATAR...', '#ffaa00');
+      sendWS({ type: 'start_avatar' });
+      document.getElementById('start-avatar-btn').style.display = 'none';
+      document.getElementById('stop-avatar-btn').style.display = 'block';
+    };
+
+    document.getElementById('stop-avatar-btn').onclick = () => {
+      sendWS({ type: 'stop_avatar' });
+    };
+
+    document.getElementById('reset-btn').onclick = () => {
+      sendWS({ type: 'reset' });
+    };
+
+    // --- Helpers ---
+    function setStatus(text, color) {
+      document.getElementById('status-text').textContent = text;
+      document.getElementById('status-dot').style.background = color;
+      document.getElementById('status-dot').style.boxShadow = `0 0 8px ${color}`;
+    }
+
+    let toastTimeout;
+    function showToast(msg, isError = false) {
+      const toast = document.getElementById('toast');
+      toast.textContent = msg;
+      toast.style.borderColor = isError ? 'var(--danger)' : 'var(--cyan)';
+      toast.style.color = isError ? 'var(--danger)' : 'var(--cyan)';
+      toast.classList.add('show');
+      clearTimeout(toastTimeout);
+      toastTimeout = setTimeout(() => toast.classList.remove('show'), 3000);
+    }
+
+    // --- Init ---
+    connectWS();
+  </script>
+</body>
+</html>
+Write this as a complete, valid HTML file — include every line.
+
+✅ STEP 7 — ERROR HANDLING & TESTING CHECKLIST
+After writing all files, perform these tests in order:
+Test 1 — Basic Server Start
+bashnode server.js
+
+Expected: ✅ NIYATI is running at http://localhost:3000
+If error: Check .env file exists and has valid PORT
+
+Test 2 — Frontend Loads
+
+Open browser at http://localhost:3000
+Expected: Dark JARVIS UI loads with status "ONLINE"
+No console errors in browser DevTools
+
+Test 3 — WebSocket Connection
+
+Open browser DevTools → Network → WS tab
+Refresh page
+Expected: WebSocket connection to ws://localhost:3000 shows as connected
+
+Test 4 — Gemini Chat
+
+Type "Hello, introduce yourself" in the text input → click Send
+Expected: AI response appears with typing animation in the chat
+If error 400 API_KEY_INVALID: Double check GEMINI_API_KEY in .env
+If error model not found: Change model to gemini-3.1-flash-live-preview in gemini.js for testing
+
+Test 5 — Tool Execution
+
+Type "Open YouTube" → Send
+Expected: YouTube opens in browser AND a toast notification appears
+Type "Search for weather today" → Send
+Expected: Google search opens in browser
+
+Test 6 — HeyGen Avatar
+
+Click "ACTIVATE AVATAR" button
+Expected: Avatar container shows video stream (live avatar appears)
+If error 401: Check HEYGEN_API_KEY in .env
+If error with avatar_id: Verify HEYGEN_AVATAR_ID — get it from HeyGen dashboard
+After avatar is active, type any message → Expected: Avatar speaks the response
+
+Test 7 — Voice Input
+
+Click microphone button (should pulse/glow)
+Speak a sentence
+Expected: Voice transcribed and sent as message; AI responds; avatar speaks
+
+Test 8 — Hindi Voice
+
+Click "हि / EN" button to switch to Hindi
+Speak in Hindi
+Expected: Hindi speech recognized correctly
+
+Test 9 — Reconnection
+
+Stop the server (Ctrl+C)
+Expected: Status changes to "RECONNECTING..."
+Restart server
+Expected: Auto-reconnects and status returns to "ONLINE"
+
+
+🚨 COMMON ERRORS & FIXES
+ErrorFixCannot find module '@google/generative-ai'Run npm install @google/generative-aiCannot find module 'open'Run npm install open — Note: open v9+ is ESM only, use open@8 for CommonJS: npm install open@8HeyGen returns 403Your API key is wrong or expiredWebRTC video not showingCheck browser allows camera/mic. Try in Chrome.SpeechRecognition not definedUse Google Chrome — Firefox doesn't support Web Speech APIGemini 429 Rate LimitAdd await new Promise(r => setTimeout(r, 1000)) before API callCORS error on WebSocketWebSocket doesn't have CORS — this error is from HTTP fetch. Check server has cors() middleware
+
+🔐 STEP 8 — FINAL PACKAGE.JSON
+Make sure package.json has this start script:
+json{
+  "name": "niyati-assistant",
+  "version": "1.0.0",
+  "description": "JARVIS-style AI Assistant",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "npx nodemon server.js"
+  },
+  "dependencies": {
+    "@google/generative-ai": "^0.21.0",
+    "axios": "^1.7.0",
+    "cors": "^2.8.5",
+    "dotenv": "^16.0.0",
+    "express": "^4.18.0",
+    "open": "^8.4.2",
+    "ws": "^8.17.0"
+  }
+}
+Install nodemon for auto-restart during development: npm install -g nodemon
+
+🚀 HOW TO RUN NIYATI
+bash# 1. Fill in .env with your API keys
+# 2. Install dependencies
+npm install
+
+# 3. Start NIYATI
+npm start
+
+# 4. Open in Chrome
+# Navigate to: http://localhost:3000
+
+📝 FINAL NOTES FOR AI
+
+Write every file completely — no // TODO or placeholder comments
+Test each file independently before integrating
+The HeyGen Streaming API requires a paid plan to work — if it fails, gracefully hide the avatar section and keep the chat + voice working
+Use open@8 (not v9+) because this is a CommonJS project
+If @google/generative-ai model names have changed, use gemini-3.1-flash-live-preview as the fallback model name
+All API keys come from .env only — never hardcode them
+The frontend index.html must be a single self-contained file — no separate CSS/JS files
+After all files are written, run the full test checklist above and fix any errors before declaring complete
